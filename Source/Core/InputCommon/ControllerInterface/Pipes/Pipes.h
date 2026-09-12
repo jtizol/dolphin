@@ -19,7 +19,15 @@ namespace ciface::Pipes
 // are clamped to [0, 1] and otherwise invalid commands are discarded.
 // {PRESS, RELEASE} {A, B, X, Y, Z, START, L, R, D_UP, D_DOWN, D_LEFT, D_RIGHT}
 // SET {L, R} [0, 1]
-// SET {MAIN, C} [0, 1] [0, 1]
+// SET {MAIN, C, IR} [0, 1] [0, 1]
+// SET {ACC, GYR} [-1, 1] [-1, 1] [-1, 1]
+//
+// The three-value form carries an IMU reading (accelerometer, gyroscope) and is SIGNED, since
+// zero rather than one-half is its meaningful rest point. It exists so an emulated Wii Remote
+// -- whose IMUAccelerometer and IMUGyroscope groups need six analog inputs between them, plus
+// two more for the IR pointer -- can be driven over a pipe. Values are normalized, not
+// physical: scale them in the binding expression rather than sending g or degrees/second,
+// because SetAxis() clamps to a unit range.
 
 std::unique_ptr<ciface::InputBackend> CreateInputBackend(ControllerInterface* controller_interface);
 

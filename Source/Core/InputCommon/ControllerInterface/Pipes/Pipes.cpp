@@ -27,7 +27,29 @@ static const std::array<std::string, 12> s_button_tokens{
 
 static const std::array<std::string, 2> s_shoulder_tokens{{"L", "R"}};
 
-static const std::array<std::string, 2> s_axis_tokens{{"MAIN", "C"}};
+// 2D axis pairs: a stick or a cursor position. Unsigned [0,1] per axis, 0.5 centered --
+// the convention the 4-token `SET <name> <x> <y>` form has always used.
+// IR is new here: it is the Wii Remote's pointer, which is a POSITION on the screen and so
+// reads naturally in the same unsigned space a stick does.
+static const std::array<std::string, 3> s_axis_tokens{{"MAIN", "C", "IR"}};
+
+// 3D axis triples: an IMU reading. SIGNED [-1,1] per axis, 0 centered, because an
+// accelerometer and a gyroscope are signed by nature and pinning them to a 0.5 rest point
+// would put the neutral value in a different place than every consumer expects.
+//
+// These exist so an emulated Wii Remote can be driven over a pipe at all. Dolphin's emulated
+// Wiimote binds motion through the IMUAccelerometer (Up/Down/Left/Right/Forward/Backward) and
+// IMUGyroscope (Pitch/Roll/Yaw x2) control groups, which is 6 analog inputs; add the 2 for the
+// IR pointer and a Wii Remote needs 8 axes. Before this, PipeDevice offered 6 in total (MAIN
+// X/Y, C X/Y, L, R) and every one of them was already spoken for by a GameCube pad, so a
+// Wiimote simply could not be expressed -- not approximately, at all.
+//
+// Magnitude is deliberately NOT handled here. A real swing is several g and several hundred
+// degrees/second, both far outside [-1,1], but SetAxis() clamps to that range and widening the
+// clamp would change what every existing axis means. The writer sends a NORMALIZED value and
+// the binding expression scales it (`` `Axis GYR X +` * 20 ``), which keeps the wire format
+// unitless and puts the per-game feel in config where it can be tuned without a rebuild.
+static const std::array<std::string, 2> s_triaxis_tokens{{"ACC", "GYR"}};
 
 static double StringToDouble(const std::string& text)
 {
@@ -91,6 +113,14 @@ PipeDevice::PipeDevice(int fd, std::string name) : m_fd(fd), m_name(std::move(na
     AddAxis(tok + " X", 0.5);
     AddAxis(tok + " Y", 0.5);
   }
+  for (const auto& tok : s_triaxis_tokens)
+  {
+    // 0.5 is the resting state in AddAxis()' own unsigned space, i.e. a signed zero --
+    // the same neutral the 2D axes start at.
+    AddAxis(tok + " X", 0.5);
+    AddAxis(tok + " Y", 0.5);
+    AddAxis(tok + " Z", 0.5);
+  }
 }
 
 PipeDevice::~PipeDevice()
@@ -148,7 +178,7 @@ void PipeDevice::SetAxis(const std::string& entry, double value)
 void PipeDevice::ParseCommand(const std::string& command)
 {
   const std::vector<std::string> tokens = SplitString(command, ' ');
-  if (tokens.size() < 2 || tokens.size() > 4)
+  if (tokens.size() < 2 || tokens.size() > 5)
     return;
   if (tokens[0] == "PRESS" || tokens[0] == "RELEASE")
   {
@@ -169,6 +199,18 @@ void PipeDevice::ParseCommand(const std::string& command)
       double y = StringToDouble(tokens[3]);
       SetAxis(tokens[1] + " X", x);
       SetAxis(tokens[1] + " Y", y);
+    }
+    else if (tokens.size() == 5)
+    {
+      // An IMU triple. Signed [-1,1] on the wire, mapped into SetAxis()' unsigned space the
+      // same way the single-value shoulder form above does it -- so 0.0 lands at 0.5, which
+      // is the rest value the constructor gave these axes.
+      double x = StringToDouble(tokens[2]);
+      double y = StringToDouble(tokens[3]);
+      double z = StringToDouble(tokens[4]);
+      SetAxis(tokens[1] + " X", (x / 2.0) + 0.5);
+      SetAxis(tokens[1] + " Y", (y / 2.0) + 0.5);
+      SetAxis(tokens[1] + " Z", (z / 2.0) + 0.5);
     }
   }
 }
