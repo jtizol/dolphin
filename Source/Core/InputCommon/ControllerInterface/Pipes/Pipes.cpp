@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdlib>
 #include <fcntl.h>
 #include <iostream>
@@ -92,7 +93,34 @@ void InputBackend::PopulateDevices()
     int fd = open(child.physicalName.c_str(), O_RDONLY | O_NONBLOCK);
     if (fd < 0)
       continue;
-    g_controller_interface.AddDevice(std::make_shared<PipeDevice>(fd, child.virtualName));
+    auto device = std::make_shared<PipeDevice>(fd, child.virtualName);
+    // CABINET PATCH: print the device's whole input vocabulary, once, at enumeration.
+    //
+    // A binding naming an input this device does not expose does not fail -- the expression
+    // parser resolves nothing and the control reads 0 forever, silently. So the one fact
+    // needed to tell "my ini is wrong" from "my ini is right and something else is broken" is
+    // the exact list of names on offer, and it is otherwise only obtainable by rebuilding the
+    // emulator with a printf in it. Which is how it was obtained, before this existed.
+    // Every pipe device is built from the same token arrays, so the list is spelled out for
+    // the first one and the rest just say they match it. Four identical 68-input dumps is the
+    // kind of noise that gets a useful log line skimmed past.
+    static bool listed = false;
+    fprintf(stderr, "[CAB-INPUT] pipe device %s exposes %zu inputs", device->GetName().c_str(),
+            device->Inputs().size());
+    if (listed)
+    {
+      fprintf(stderr, " (same set)\n");
+    }
+    else
+    {
+      listed = true;
+      fprintf(stderr, ":");
+      for (auto* input : device->Inputs())
+        fprintf(stderr, " `%s`", input->GetName().c_str());
+      fprintf(stderr, "\n");
+    }
+    fflush(stderr);
+    g_controller_interface.AddDevice(std::move(device));
   }
 }
 
@@ -143,9 +171,61 @@ Core::DeviceRemoval PipeDevice::UpdateInput()
   while (newline != std::string::npos)
   {
     std::string command = m_buf.substr(0, newline);
+    m_got_command = true;
     ParseCommand(command);
     m_buf.erase(0, newline + 1);
     newline = m_buf.find("\n");
+  }
+
+  // CABINET PATCH: opt-in live value dump, once a second, listing only what is ACTIVE.
+  //
+  // This is the half of "why is nothing responding?" that no amount of config inspection can
+  // answer: is the data arriving at the device at all? Getting that answer previously meant
+  // rebuilding the emulator with a printf in it, five times in one session. Off unless
+  // CAB_INPUT_PROBE is set, so it costs a getenv per poll in normal use.
+  //
+  // ACTIVE only, and deliberately: a full dump is 68 inputs of mostly-neutral noise, and the
+  // one value that changed is what the reader is looking for. Neutral is 0 for a button and
+  // the axis's own rest value, which is why the comparison is against m_rest rather than a
+  // constant -- a shoulder rests at 0.0 and a stick half-axis at 0.5.
+  static const bool probe = getenv("CAB_INPUT_PROBE") != nullptr;
+  if (probe)
+  {
+    const auto now = std::chrono::steady_clock::now();
+    if (now - m_last_probe >= std::chrono::seconds(1))
+    {
+      m_last_probe = now;
+      // Before the first command lands, every axis half still holds AddAxis()' initial 0.5 --
+      // which is not "deflected", it is "never written". Reporting that as 56 active axes would
+      // bury the one fact the reader needs, which is that nothing is arriving at all.
+      if (!m_got_command)
+      {
+        fprintf(stderr, "[CAB-INPUT] %s no commands received yet (is anything writing to the "
+                        "FIFO?)\n", m_name.c_str());
+        fflush(stderr);
+        return Core::DeviceRemoval::Keep;
+      }
+      std::string active;
+      for (const auto& [name, in] : m_buttons)
+        if (in->GetState() > 0.5)
+          active += " " + name;
+      for (const auto& [name, in] : m_axes)
+      {
+        // Skip axes NOTHING has written. AddAxis initialises both halves to the axis's unsplit
+        // rest value (0.5 for a stick, 0.0 for a shoulder), which is not a deflection -- but a
+        // half-axis that HAS been written reads 0 when centred. So "untouched" and "centred"
+        // are different numbers for the same physical state, and only tracking which axes have
+        // actually been set tells them apart. Without this, a Wii Remote's report was thirteen
+        // stick and pointer axes at 0.500 that nobody was driving, burying the one real value.
+        if (!m_written.count(name))
+          continue;
+        if (in->GetState() > 0.01)
+          active += " " + name + "=" + std::to_string(in->GetState()).substr(0, 5);
+      }
+      fprintf(stderr, "[CAB-INPUT] %s%s\n", m_name.c_str(),
+              active.empty() ? " idle (nothing arriving, or everything at rest)" : active.c_str());
+      fflush(stderr);
+    }
   }
   return Core::DeviceRemoval::Keep;
 }
@@ -167,6 +247,8 @@ void PipeDevice::SetAxis(const std::string& entry, double value)
   value = std::clamp(value, 0.0, 1.0);
   double hi = std::max(0.0, value - 0.5) * 2.0;
   double lo = (0.5 - std::min(0.5, value)) * 2.0;
+  m_written.insert(entry + " +");
+  m_written.insert(entry + " -");
   auto search_hi = m_axes.find(entry + " +");
   if (search_hi != m_axes.end())
     search_hi->second->SetState(hi);

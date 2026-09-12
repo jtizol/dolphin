@@ -3,7 +3,9 @@
 
 #pragma once
 
+#include <chrono>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -61,6 +63,11 @@ private:
 
   const int m_fd;
   const std::string m_name;
+  // Which axis halves have actually been written, and the probe's rate limiter -- see
+  // UpdateInput()'s CAB-INPUT block. Both exist only for the opt-in diagnostic dump.
+  std::set<std::string> m_written;
+  std::chrono::steady_clock::time_point m_last_probe{};
+  bool m_got_command = false;
   std::string m_buf;
   std::map<std::string, PipeInput*> m_buttons;
   std::map<std::string, PipeInput*> m_axes;

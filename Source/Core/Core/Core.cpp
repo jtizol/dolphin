@@ -1034,7 +1034,47 @@ void UpdateInputGate(bool require_focus, bool require_full_focus)
   // Ignore full focus if we don't require basic focus
   const bool full_focus_passes =
       !require_focus || !require_full_focus || (focus_passes && Host_RendererHasFullFocus());
-  ControlReference::SetInputGate(focus_passes && full_focus_passes);
+  const bool open = focus_passes && full_focus_passes;
+
+  // CABINET PATCH: say out loud when the gate shuts.
+  //
+  // A closed gate makes InputReference::State() return 0.0 for EVERY expression, so a perfectly
+  // configured controller reads as a controller that does nothing: the write succeeds, the
+  // device has the value, the binding resolved, and nothing moves. Nothing in stock Dolphin
+  // mentions it, because a human sitting at the keyboard has focus and never sees it. A cabinet
+  // driven by phones never has focus, so this is the default failure here rather than a corner
+  // case -- it cost most of a session, and had silently disabled GameCube input for far longer.
+  //
+  // Logged on TRANSITION only (plus the first evaluation), so this is a handful of lines per
+  // run rather than one per frame. `[Input] BackgroundInput = True` is the fix and is named
+  // here so the log line carries its own remedy.
+  // THREAD_LOCAL, like the gate itself. ControlReference's gate is `thread_local`, and this is
+  // called from more than one thread with different policies -- the controller poll passes
+  // require_focus = !BackgroundInput, while the hotkey scheduler passes MAIN_FOCUSED_HOTKEYS.
+  // Plain statics here made those two threads' transitions interleave into one stream, so the
+  // log showed the gate "closing" when only the HOTKEY thread's gate had closed. A diagnostic
+  // that reports another thread's state as yours is worse than none.
+  //
+  // require_focus is printed for the same reason: it is what tells the two callers apart, and
+  // `require_focus=1` is the only case where a closed gate means controllers are dead.
+  thread_local bool logged = false;
+  thread_local bool last_open = false;
+  if (!logged || open != last_open)
+  {
+    logged = true;
+    last_open = open;
+    fprintf(stderr,
+            "[CAB-INPUT] gate %s (require_focus=%d)%s\n", open ? "OPEN" : "CLOSED",
+            require_focus ? 1 : 0,
+            (open || !require_focus)
+                ? ""
+                : " -- every control expression on this thread now reads 0. If nothing responds,"
+                  " set [Input] BackgroundInput = True (Dolphin ignores controllers while"
+                  " unfocused).");
+    fflush(stderr);
+  }
+
+  ControlReference::SetInputGate(open);
 }
 
 CPUThreadGuard::CPUThreadGuard(Core::System& system)
